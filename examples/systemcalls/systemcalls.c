@@ -20,11 +20,9 @@ bool do_system(const char *cmd)
  *   and return a boolean true if the system() call completed with success
  *   or false() if it returned a failure
 */
-    if (system(cmd) != 0) {
-        return false;
-    }
 
-    return true;
+    // return false/true upon result
+    return system(cmd) == 0;
 }
 
 /**
@@ -40,6 +38,7 @@ bool do_system(const char *cmd)
 *   fork, waitpid, or execv() command, or if a non-zero return value was returned
 *   by the command issued in @param arguments with the specified arguments.
 */
+
 
 bool do_exec(int count, ...)
 {
@@ -65,25 +64,20 @@ bool do_exec(int count, ...)
  *   as second argument to the execv() command.
  *
 */
-    pid_t pid;
-    int ret;
-    int status;
+    pid_t pid = fork();
 
-    pid = fork();
-
-    if (pid == -1) {
-        perror("fork");
+    if (pid < 0) {
         return false;
-    } else if (pid == 0) {
-
-        ret = execv(command[0], command);
-        if (ret == -1) 
+    } else if (pid !=  0) { // parent process
+        int status;
+        pid_t child_pid = waitpid(pid, &status, 0);
+        if (child_pid < 0 || WEXITSTATUS(status) != EXIT_SUCCESS) 
             return false;
-    }
+    } else { // child process
 
-    ret = waitpid (pid, &status, 0);
-    if (ret == -1 || status != 0) 
-        return false;
+        execv(command[0], &command[0]);
+        exit(EXIT_FAILURE);
+    }
 
     va_end(args);
 
@@ -118,39 +112,25 @@ bool do_exec_redirect(const char *outputfile, int count, ...)
  *   The rest of the behaviour is same as do_exec()
  *
 */
-    int ret;
-    int kidpid;
-    int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
-    if (fd < 0) { perror("open"); return false; }
-    switch (kidpid = fork()) {
-    case -1: perror("fork"); return false;
-    case 0:
-        if (dup2(fd, 1) < 0) { perror("dup2"); return false; }
-        close(fd);
-        ret = execvp(command[0], command);
-        if (ret == -1)
+
+    int pid;
+    switch (pid = fork()) {
+    case -1:
+        return false;
+    case 0: // child
+        int fd = open(outputfile, O_WRONLY|O_TRUNC|O_CREAT, 0644);
+        if (dup2(fd, 1) < 0) { 
+            close(fd);
             return false;
-    default:
-        close(fd);
-        pid_t pid;
-        int status;
-
-        pid = fork();
-
-        if (pid == -1) {
-            perror("fork");
-            return false;
-        } else if (pid == 0) {
-
-            ret = execv(command[0], command);
-            if (ret == -1) 
-                return false;
         }
-
-        ret = waitpid (pid, &status, 0);
-        if (ret == -1 || status != 0) 
+        execv(command[0], &command[0]);
+        exit(EXIT_FAILURE);
+    default: // parent
+        int status;
+        pid_t child_pid = waitpid(pid, &status, 0);
+        if (child_pid < 0 || WEXITSTATUS(status) != EXIT_SUCCESS) 
             return false;
-    }
+        }
 
 
     va_end(args);
