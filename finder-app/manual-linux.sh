@@ -7,7 +7,8 @@ set -u
 
 # just for forcing 2nd run of the Action which stuck
 
-OUTDIR=/tmp/aeld
+##OUTDIR=/tmp/aeld
+OUTDIR=/home/ed/workspace/cu/linux_build
 KERNEL_REPO=git://git.kernel.org/pub/scm/linux/kernel/git/stable/linux-stable.git
 KERNEL_VERSION=v5.15.163
 BUSYBOX_VERSION=1_33_1
