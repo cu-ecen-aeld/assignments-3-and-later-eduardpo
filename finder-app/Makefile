@@ -1,7 +1,7 @@
 # Compiler and flags
 CROSS_COMPILE ?= aarch64-none-linux-gnu-
-#CC := $(CROSS_COMPILE)gcc
-CC = gcc
+CC := $(CROSS_COMPILE)gcc
+#CC = gcc
 CFLAGS = -Wall -std=c99
 
 # Output executable
