@@ -16,6 +16,8 @@ FINDER_APP_DIR=$(realpath $(dirname $0))
 ARCH=arm64
 CROSS_COMPILE=aarch64-none-linux-gnu-
 
+SYSROOT_PATH=$(${CROSS_COMPILE}gcc --print-sysroot)
+
 SOURCE_DIR=$(pwd)
 
 if [ $# -lt 1 ]
@@ -88,10 +90,10 @@ echo "Library dependencies"
 
 # TODO: Add library dependencies to rootfs
 echo "Adding Library dependencies"
-cp $(find /usr/local/arm-cross-compiler/install/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu -name ld-linux-aarch64.so.1) lib
-cp $(find /usr/local/arm-cross-compiler/install/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu -name libm.so.6) lib64
-cp $(find /usr/local/arm-cross-compiler/install/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu -name libresolv.so.2) lib64
-cp $(find /usr/local/arm-cross-compiler/install/arm-gnu-toolchain-14.2.rel1-x86_64-aarch64-none-linux-gnu -name libc.so.6) lib64
+cp ${SYSROOT_PATH}/lib/ld-linux-aarch64.so.1 lib
+cp ${SYSROOT_PATH}/lib64/libm.so.6 lib64
+cp ${SYSROOT_PATH}/lib64/libresolv.so.2 lib64
+cp ${SYSROOT_PATH}/lib64/libc.so.6 lib64
 
 # TODO: Make device nodes
 sudo mknod -m 666 dev/null c 1 3
