@@ -19,10 +19,17 @@ void* threadfunc(void* thread_param)
     struct thread_data* thread_func_args = (struct thread_data *) thread_param;
     
     usleep(thread_func_args->wait_to_obtain_ms*1000);
-    pthread_mutex_lock(thread_func_args->mutex);
-    usleep(thread_func_args->wait_to_release_ms*1000);
-    pthread_mutex_unlock(thread_func_args->mutex);
-    thread_func_args->thread_complete_success = true;
+    if (pthread_mutex_lock(thread_func_args->mutex) != 0) {
+        ERROR_LOG("Failed to lock");
+    } else {
+        usleep(thread_func_args->wait_to_release_ms*1000);
+        if (pthread_mutex_unlock(thread_func_args->mutex) != 0) {
+            ERROR_LOG("Failed to unlock");
+        } else {
+            DEBUG_LOG("Thread function completed successfully!")
+            thread_func_args->thread_complete_success = true;
+        }
+    }
 
     return thread_param;
 }
