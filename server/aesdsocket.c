@@ -14,6 +14,8 @@
 #include <arpa/inet.h>
 #include <fcntl.h> //open
 #include <sys/stat.h> // umask
+#include <queue.h>
+#include <pthread.h>
 
 
 #define MAX_MSG_SIZE 1024*1024
@@ -22,18 +24,44 @@ const char* PORT = "9000";
 
 int sfd, cfd;
 FILE *dataFile;
+pthread_mutex_t dataMutex;
+
+// SLIST.
+typedef struct slist_data_s slist_data_t;
+struct slist_data_s {
+    pthread_t t_id;
+    bool t_complete;
+    int sfd;
+    int cfd;
+    struct sockaddr_storage* their_addr;
+    SLIST_ENTRY(slist_data_s) entries;
+};
+
+SLIST_HEAD(slisthead, slist_data_s) head;
+//SLIST_INIT(&head);
 
 volatile sig_atomic_t close_syslog_flag = 0;
 
 void signal_handler(int signum) {
 
     int errno_saved = errno;
+    slist_data_t *t_data, *tmp;
 
     syslog(LOG_DEBUG, "Caught signal: %d", signum);
 
+     // Remove threads data, free up memory
+     syslog(LOG_DEBUG, "Cleaning running threads data...");
+     SLIST_FOREACH_SAFE(t_data, &head, entries, tmp) {
+        syslog(LOG_DEBUG, "Cleaning thread id: %lu, closing client socket fd: %d", t_data->t_id, t_data->cfd);
+        close(t_data->cfd);
+        SLIST_REMOVE(&head, t_data, slist_data_s, entries);
+        free(t_data); // Free the removed node
+
+    }
+
     // Close fds
-    syslog(LOG_DEBUG, "Closing client socket fd: %d", cfd);
-    close(cfd);
+    // syslog(LOG_DEBUG, "Closing client socket fd: %d",  cfd);
+    // close(cfd);
     syslog(LOG_DEBUG, "Closing server socket fd: %d", sfd);
     close(sfd);
     syslog(LOG_DEBUG, "Closing dataFile");
@@ -52,10 +80,116 @@ void signal_handler(int signum) {
     exit(EXIT_SUCCESS);
 }
 
+void *processConnectionThread(void *arg) {
+
+    slist_data_t* t_data = (slist_data_t*)arg;
+    char ip_str[INET_ADDRSTRLEN];
+    char rcvmsg[MAX_MSG_SIZE];
+
+    syslog(LOG_DEBUG, "Connection thread %lu for client %d is running...", t_data->t_id, t_data->cfd);
+
+    // Logic here
+    // Get client address
+    inet_ntop(AF_INET, &(((struct sockaddr_in *)t_data->their_addr)->sin_addr), ip_str, sizeof(ip_str));
+    syslog(LOG_DEBUG, "New client connection from address: %s", ip_str);
+
+    // Blocking recv: This will wait until data is received
+    int len = recv(t_data->cfd, rcvmsg, MAX_MSG_SIZE, 0);
+
+    if (len < 0) {
+        syslog(LOG_ERR, "Error: recv on socket %d failed, error: %s (%d)", t_data->cfd, strerror(errno), errno);
+        close(t_data->cfd);
+        close(t_data->sfd);
+        closelog();
+        exit(-1);
+    } else if (len == 0) {
+        syslog(LOG_DEBUG, "Client on socket %d disconnected", t_data->cfd);
+    } else {
+
+        for (int i=0; i<len; i++) {
+            if (rcvmsg[i] == '\n') {
+                rcvmsg[++i] = '\0';
+                break;
+            }
+        }
+        syslog(LOG_DEBUG, "Data received from client on socket %d: %s", t_data->cfd, rcvmsg);
+
+        // critical section start
+        int rc = pthread_mutex_lock(&dataMutex);
+        if (rc != 0 ) {
+            syslog(LOG_ERR, "pthread_mutex_lock failed with %d", rc);
+            close(t_data->cfd);
+            close(t_data->sfd);
+            closelog();
+            fclose(dataFile);
+            exit(-1);
+        }
+        dataFile = fopen(AESDSOCKETDATA, "a+");
+        if (dataFile == NULL) {
+            syslog(LOG_ERR,"Failed to open file %s, error: %s (%d)", AESDSOCKETDATA, strerror(errno), errno);
+            close(t_data->cfd);
+            close(t_data->sfd);
+            closelog();
+            fclose(dataFile);
+            exit(-1);
+        }
+        fprintf(dataFile, "%s", rcvmsg);
+
+        rc = pthread_mutex_unlock(&dataMutex);
+        if (rc != 0 ) {
+            syslog(LOG_ERR, "pthread_mutex_unlock failed with %d", rc);
+            close(t_data->cfd);
+            close(t_data->sfd);
+            closelog();
+            fclose(dataFile);
+            exit(-1);
+        }
+        // critical section end
+
+        // send the whole contant back
+        rewind(dataFile);
+        while (fgets(rcvmsg, sizeof(rcvmsg), dataFile) != NULL) {
+            size_t len = strlen(rcvmsg);
+            send(t_data->cfd, rcvmsg, len, 0); // Send the received data
+        }
+    
+    }
+    // update complete flag
+    t_data->t_complete = true;
+
+    return NULL;
+}
+
+// Create thread, add to slist
+int createConnectionThread(int cfd, int sfd, struct sockaddr_storage* their_addr) {
+    int rc;
+    slist_data_t* t_data = malloc(sizeof(slist_data_t));
+    t_data->cfd = cfd;
+    t_data->sfd = sfd;
+    t_data->their_addr = their_addr;
+    t_data->t_complete = false;
+    rc = pthread_create(&t_data->t_id, NULL, processConnectionThread, t_data); 
+    if (rc != 0) {
+        syslog(LOG_ERR, "failed to create connection thread");
+        return -1;
+    }
+    SLIST_INSERT_HEAD(&head, t_data, entries);
+    return 0;
+}
+
 int main(int argc, char *argv[]) {
 
     // open syslog
     openlog("aesdsocket", LOG_PID, LOG_USER);
+
+    SLIST_INIT(&head);
+    slist_data_t *t_data, *tmp;
+    int rc = pthread_mutex_init(&dataMutex, NULL);
+    if ( rc != 0 ) {
+        syslog(LOG_ERR, "Failed to initialize account mutex, error was %d", rc);
+        closelog();
+        exit(-1);
+    }
 
     int status;
     struct addrinfo hints;
@@ -230,7 +364,7 @@ int main(int argc, char *argv[]) {
     while (1) {
         addr_size = sizeof their_addr;
         cfd = -1;
-        char rcvmsg[MAX_MSG_SIZE];
+        //char rcvmsg[MAX_MSG_SIZE];
 
 
         // Blocking accept
@@ -241,46 +375,65 @@ int main(int argc, char *argv[]) {
             exit(-1);
         }
 
-        // Get client address
-        inet_ntop(AF_INET, &(((struct sockaddr_in *)&their_addr)->sin_addr), ip_str, sizeof(ip_str));
-        syslog(LOG_DEBUG, "New client connection from address: %s", ip_str);
-
-        // Blocking recv: This will wait until data is received
-        int len = recv(cfd, rcvmsg, MAX_MSG_SIZE, 0);
-
-        if (len < 0) {
-            syslog(LOG_ERR, "Error: recv on socket %d failed", cfd);
-            close(cfd);
-            close(sfd);
-            closelog();
+        // Create the connection thread adds to the list
+        if (createConnectionThread(cfd, sfd, &their_addr) < 0) {
+            syslog(LOG_ERR, "Creating thread for client connection %d failed", cfd);
             exit(-1);
-        } else if (len == 0) {
-            syslog(LOG_DEBUG, "Client on socket %d disconnected", cfd);
-        } else {
-            for (int i=0; i<len; i++) {
-                if (rcvmsg[i] == '\n') {
-                    rcvmsg[++i] = '\0';
-                    break;
-                }
-            }
-            syslog(LOG_DEBUG, "Data received from client on socket %d: %s", cfd, rcvmsg);
-            dataFile = fopen(AESDSOCKETDATA, "a+");
-            if (dataFile == NULL) {
-                syslog(LOG_ERR,"%s", strerror(errno));
-                close(cfd);
-                close(sfd);
-                closelog();
-                exit(-1);
-            }
-            fprintf(dataFile, "%s", rcvmsg);
-            rewind(dataFile);
-            while (fgets(rcvmsg, sizeof(rcvmsg), dataFile) != NULL) {
-                size_t len = strlen(rcvmsg);
-                send(cfd, rcvmsg, len, 0); // Send the received data
-            }
-        
         }
+        syslog(LOG_DEBUG, "Thread created successfully for client connection %d", cfd);
+
+        // Check for completed threads and join
+        SLIST_FOREACH_SAFE(t_data, &head, entries, tmp) {
+            if (t_data->t_complete) {
+                pthread_join(t_data->t_id, NULL);
+                syslog(LOG_DEBUG, "Thread %lu for connection %d joined successfully", (unsigned long)t_data->t_id, cfd);
+                SLIST_REMOVE(&head, t_data, slist_data_s, entries);
+                free(t_data); // Free the removed node
+            }
+        }
+
+        // // Get client address
+        // inet_ntop(AF_INET, &(((struct sockaddr_in *)&their_addr)->sin_addr), ip_str, sizeof(ip_str));
+        // syslog(LOG_DEBUG, "New client connection from address: %s", ip_str);
+
+        // // Blocking recv: This will wait until data is received
+        // int len = recv(cfd, rcvmsg, MAX_MSG_SIZE, 0);
+
+        // if (len < 0) {
+        //     syslog(LOG_ERR, "Error: recv on socket %d failed", cfd);
+        //     close(cfd);
+        //     close(sfd);
+        //     closelog();
+        //     exit(-1);
+        // } else if (len == 0) {
+        //     syslog(LOG_DEBUG, "Client on socket %d disconnected", cfd);
+        // } else {
+
+        //     for (int i=0; i<len; i++) {
+        //         if (rcvmsg[i] == '\n') {
+        //             rcvmsg[++i] = '\0';
+        //             break;
+        //         }
+        //     }
+        //     syslog(LOG_DEBUG, "Data received from client on socket %d: %s", cfd, rcvmsg);
+        //     dataFile = fopen(AESDSOCKETDATA, "a+");
+        //     if (dataFile == NULL) {
+        //         syslog(LOG_ERR,"%s", strerror(errno));
+        //         close(cfd);
+        //         close(sfd);
+        //         closelog();
+        //         exit(-1);
+        //     }
+        //     fprintf(dataFile, "%s", rcvmsg);
+        //     rewind(dataFile);
+        //     while (fgets(rcvmsg, sizeof(rcvmsg), dataFile) != NULL) {
+        //         size_t len = strlen(rcvmsg);
+        //         send(cfd, rcvmsg, len, 0); // Send the received data
+        //     }
+        
+        // }
         if (close_syslog_flag) {
+            //pthread_mutex_destroy(&dataMutex);
             closelog();
             close_syslog_flag = 0; // Reset the flag
             break; // Or perform other cleanup
