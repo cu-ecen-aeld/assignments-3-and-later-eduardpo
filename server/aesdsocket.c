@@ -42,6 +42,89 @@ SLIST_HEAD(slisthead, slist_data_s) head;
 
 volatile sig_atomic_t close_syslog_flag = 0;
 
+// POSIX timer variables
+timer_t timer_id;
+
+// Signal handler for the timer
+void timer_handler(int signo) {
+
+    //syslog(LOG_DEBUG, "Caught signal: %d", signo);
+
+    if (signo == SIGALRM) {
+        syslog(LOG_DEBUG, "Caught signal: %d", SIGALRM);
+        time_t now = time(NULL);
+        struct tm *time_info = localtime(&now);
+        char time_str[64];
+
+        strftime(time_str, sizeof(time_str), "%Y-%m-%d %H:%M:%S\n", time_info);
+
+        // Protect file writing with a mutex
+        if (pthread_mutex_lock(&dataMutex) != 0) {
+            syslog(LOG_ERR,"Failed to lock dataMutex");
+            // close(t_data->cfd);
+            // close(t_data->sfd);
+            closelog();
+            exit(-1);
+        }
+
+        char time_str_buffer[100];
+        sprintf(time_str_buffer, "timestamp:%s", time_str);
+        syslog(LOG_DEBUG, "Trying to write to file: %s", time_str_buffer);
+        int fd = open(AESDSOCKETDATA, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (dataFile >= 0) {
+            write(fd, time_str_buffer, strlen(time_str_buffer));
+            close(fd);
+        } else {
+            syslog(LOG_ERR,"Failed to open file!");
+        }
+
+        if (pthread_mutex_unlock(&dataMutex) != 0) {
+            syslog(LOG_ERR,"Failed to unlock dataMutex");
+            // close(t_data->cfd);
+            // close(t_data->sfd);
+            closelog();
+            exit(-1);
+        }
+        syslog(LOG_DEBUG, "After critical section");
+    }
+}
+
+// Function to create and start the POSIX timer
+void setup_timer() {
+    struct sigevent sev;
+    struct itimerspec its;
+    struct sigaction sa;
+
+    // Set up signal handler
+    sa.sa_flags = SA_RESTART;
+    sa.sa_handler = timer_handler;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGALRM, &sa, NULL) == -1) {
+        syslog(LOG_ERR, "sigaction failed");
+        exit(-1);
+    }
+
+    // Configure timer to send SIGALRM
+    sev.sigev_notify = SIGEV_SIGNAL;
+    sev.sigev_signo = SIGALRM;
+    sev.sigev_value.sival_ptr = &timer_id;
+    if (timer_create(CLOCK_REALTIME, &sev, &timer_id) == -1) {
+        syslog(LOG_ERR, "timer_create failed");
+        exit(-1);
+    }
+
+    // Set timer to fire every 10 seconds
+    its.it_value.tv_sec = 10;
+    its.it_value.tv_nsec = 0;
+    its.it_interval.tv_sec = 10;
+    its.it_interval.tv_nsec = 0;
+
+    if (timer_settime(timer_id, 0, &its, NULL) == -1) {
+        syslog(LOG_ERR, "timer_settime failed");
+        exit(-1);
+    }
+}
+
 void signal_handler(int signum) {
 
     int errno_saved = errno;
@@ -56,17 +139,17 @@ void signal_handler(int signum) {
         close(t_data->cfd);
         SLIST_REMOVE(&head, t_data, slist_data_s, entries);
         free(t_data); // Free the removed node
-
     }
 
-    // Close fds
-    // syslog(LOG_DEBUG, "Closing client socket fd: %d",  cfd);
-    // close(cfd);
+    // cleaning
     syslog(LOG_DEBUG, "Closing server socket fd: %d", sfd);
     close(sfd);
-    syslog(LOG_DEBUG, "Closing dataFile");
-    fclose(dataFile);
-
+    // syslog(LOG_DEBUG, "Closing dataFile");
+    // if (fclose(dataFile) != 0) {
+    //     syslog(LOG_ERR, "failed to close file");
+    // } else {
+    //     syslog(LOG_DEBUG, "dataFile is closed successf");
+    // }
     if (remove(AESDSOCKETDATA) == 0) {
         syslog(LOG_DEBUG, "%s deleted successfully", AESDSOCKETDATA);
     } else {
@@ -135,6 +218,14 @@ void *processConnectionThread(void *arg) {
         }
         fprintf(dataFile, "%s", rcvmsg);
 
+        // send the whole contant back
+        rewind(dataFile);
+        while (fgets(rcvmsg, sizeof(rcvmsg), dataFile) != NULL) {
+            size_t len = strlen(rcvmsg);
+            send(t_data->cfd, rcvmsg, len, 0); // Send the received data
+        }
+        fclose(dataFile);
+
         rc = pthread_mutex_unlock(&dataMutex);
         if (rc != 0 ) {
             syslog(LOG_ERR, "pthread_mutex_unlock failed with %d", rc);
@@ -145,14 +236,6 @@ void *processConnectionThread(void *arg) {
             exit(-1);
         }
         // critical section end
-
-        // send the whole contant back
-        rewind(dataFile);
-        while (fgets(rcvmsg, sizeof(rcvmsg), dataFile) != NULL) {
-            size_t len = strlen(rcvmsg);
-            send(t_data->cfd, rcvmsg, len, 0); // Send the received data
-        }
-    
     }
     // update complete flag
     t_data->t_complete = true;
@@ -360,7 +443,12 @@ int main(int argc, char *argv[]) {
         syslog(LOG_DEBUG, "Daemon created successfully!");
     }
 
-    /*********** the rest logic here... ************/  
+    /*********** the rest logic here... ************/
+
+    // Setup the timer
+    setup_timer();
+    
+    // Loop until killed
     while (1) {
         addr_size = sizeof their_addr;
         cfd = -1;
@@ -392,63 +480,19 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // // Get client address
-        // inet_ntop(AF_INET, &(((struct sockaddr_in *)&their_addr)->sin_addr), ip_str, sizeof(ip_str));
-        // syslog(LOG_DEBUG, "New client connection from address: %s", ip_str);
-
-        // // Blocking recv: This will wait until data is received
-        // int len = recv(cfd, rcvmsg, MAX_MSG_SIZE, 0);
-
-        // if (len < 0) {
-        //     syslog(LOG_ERR, "Error: recv on socket %d failed", cfd);
-        //     close(cfd);
-        //     close(sfd);
-        //     closelog();
-        //     exit(-1);
-        // } else if (len == 0) {
-        //     syslog(LOG_DEBUG, "Client on socket %d disconnected", cfd);
-        // } else {
-
-        //     for (int i=0; i<len; i++) {
-        //         if (rcvmsg[i] == '\n') {
-        //             rcvmsg[++i] = '\0';
-        //             break;
-        //         }
-        //     }
-        //     syslog(LOG_DEBUG, "Data received from client on socket %d: %s", cfd, rcvmsg);
-        //     dataFile = fopen(AESDSOCKETDATA, "a+");
-        //     if (dataFile == NULL) {
-        //         syslog(LOG_ERR,"%s", strerror(errno));
-        //         close(cfd);
-        //         close(sfd);
-        //         closelog();
-        //         exit(-1);
-        //     }
-        //     fprintf(dataFile, "%s", rcvmsg);
-        //     rewind(dataFile);
-        //     while (fgets(rcvmsg, sizeof(rcvmsg), dataFile) != NULL) {
-        //         size_t len = strlen(rcvmsg);
-        //         send(cfd, rcvmsg, len, 0); // Send the received data
-        //     }
-        
-        // }
+        // NOT A SIGNAL SAFE!!!
         if (close_syslog_flag) {
-            //pthread_mutex_destroy(&dataMutex);
+            pthread_mutex_destroy(&dataMutex);
+            if (timer_delete(timer_id) == -1) {
+                syslog(LOG_ERR,"timer_delete failed");
+            } else {
+                syslog(LOG_DEBUG,"timer_delete successfully");
+            }
             closelog();
-            close_syslog_flag = 0; // Reset the flag
-            break; // Or perform other cleanup
+            close_syslog_flag = 0;  // Reset the flag
+            break;                  // DAEMON IS DONE.
         }
     }
-    
-    // Close files
-    // syslog(LOG_DEBUG, "Closing client socket fd: %d", cfd);
-    // close(cfd);
-    // syslog(LOG_DEBUG, "Closing server socket fd: %d", sfd);
-    // close(sfd);
-    // syslog(LOG_DEBUG, "Closing syslog");
-    // closelog();
-    // syslog(LOG_DEBUG, "Closing dataFile");
-    // fclose(dataFile);
 
     return 0;
 }
