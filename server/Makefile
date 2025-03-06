@@ -6,7 +6,8 @@ OBJS := $(SRC:.c=.o)
 CROSS_COMPILE := aarch64-none-linux-gnu-
 
 CC ?= $(CROSS_COMPILE)gcc
-CFLAGS ?= -Wall -Werror -I/usr/local/include
+CFLAGS ?= -Wall -Werror
+LDFLAGS ?= "-pthread -lrt"
 
 $(TARGET): $(OBJS)
 	$(CC) $(OBJS) -o $(TARGET)
