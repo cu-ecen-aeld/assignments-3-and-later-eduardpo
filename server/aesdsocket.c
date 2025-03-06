@@ -14,7 +14,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h> //open
 #include <sys/stat.h> // umask
-#include <queue.h>
+#include "queue.h"
 #include <pthread.h>
 
 
