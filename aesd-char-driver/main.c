@@ -89,7 +89,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 {
     ssize_t retval = -ENOMEM;
     struct aesd_dev *dev = filp->private_data;
-    char *k_buf;
+    char *k_buf, *new_line_pos;
 
     PDEBUG("write %zu bytes with offset %lld",count,*f_pos);
     /**
@@ -107,17 +107,44 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         return -EFAULT;
     }
 
-    dev->new_entry.buffptr = k_buf;
-    dev->new_entry.size = count;
+    // Find new line
+    new_line_pos = memchr(k_buf, '\n', count) != NULL;
 
-    if (dev->buffer.full) {
-        char *buffptr_to_free = (char *)dev->buffer.entry[dev->buffer.out_offs].buffptr;
-        aesd_circular_buffer_add_entry(&dev->buffer, &dev->new_entry);
-        if (buffptr_to_free) {
-            kfree(buffptr_to_free);
+    // Check if we need to append to existing entry or create new one
+    if (dev->incomplete_entry.buffptr) {
+        // Reallocate to accommodate new data
+        char *new_buf = krealloc(dev->incomplete_entry.buffptr, 
+                               dev->incomplete_entry.size + count, 
+                               GFP_KERNEL);
+        if (!new_buf) {
+            kfree(k_buf);
+            return -ENOMEM;
         }
+        dev->incomplete_entry.buffptr = new_buf;
+        memcpy((char *)dev->incomplete_entry.buffptr + dev->incomplete_entry.size,
+               k_buf, count);
+        dev->incomplete_entry.size += count;
+        kfree(k_buf);
     } else {
-        aesd_circular_buffer_add_entry(&dev->buffer, &dev->new_entry);
+        dev->incomplete_entry.buffptr = k_buf;
+        dev->incomplete_entry.size = count;
+    }
+
+    if (new_line_pos != NULL) {
+        if (dev->buffer.full) {
+            // Save the entry that might be overwritten if buffer is full
+            char *buffptr_to_free = (char *)dev->buffer.entry[dev->buffer.out_offs].buffptr;
+            aesd_circular_buffer_add_entry(&dev->buffer, &dev->incomplete_entry);
+            if (buffptr_to_free) {
+                kfree(buffptr_to_free);
+            }
+        } else {
+            // Buffer not full, just add the entry
+            aesd_circular_buffer_add_entry(&dev->buffer, &dev->incomplete_entry);
+        }
+        // Reset incomplete entry
+        dev->incomplete_entry.buffptr = NULL;
+        dev->incomplete_entry.size = 0;
     }
 
     retval = count;
