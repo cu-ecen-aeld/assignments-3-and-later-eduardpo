@@ -18,9 +18,17 @@
 #include <pthread.h>
 
 
-#define MAX_MSG_SIZE 1024*1024
-const char* AESDSOCKETDATA = "/var/tmp/aesdsocketdata";
 const char* PORT = "9000";
+
+#define MAX_MSG_SIZE 1024*1024
+
+#define USE_AESD_CHAR_DEVICE 1
+
+#ifdef USE_AESD_CHAR_DEVICE
+    #define AESDSOCKETDATA "/dev/aesdchar"
+#else
+    #define AESDSOCKETDATA "/var/tmp/aesdsocketdata"
+#endif
 
 int sfd, cfd;
 FILE *dataFile;
@@ -42,6 +50,7 @@ SLIST_HEAD(slisthead, slist_data_s) head;
 
 volatile sig_atomic_t close_syslog_flag = 0;
 
+#if !USE_AESD_CHAR_DEVICE
 // POSIX timer variables
 timer_t timer_id;
 
@@ -124,6 +133,7 @@ void setup_timer() {
         exit(-1);
     }
 }
+#endif
 
 void signal_handler(int signum) {
 
@@ -150,11 +160,14 @@ void signal_handler(int signum) {
     // } else {
     //     syslog(LOG_DEBUG, "dataFile is closed successf");
     // }
+
+    #if !USE_AESD_CHAR_DEVICE
     if (remove(AESDSOCKETDATA) == 0) {
         syslog(LOG_DEBUG, "%s deleted successfully", AESDSOCKETDATA);
     } else {
         syslog(LOG_ERR, "failed to delete file %s", AESDSOCKETDATA);
     }
+    #endif
 
     close_syslog_flag = 1;
 
@@ -445,8 +458,10 @@ int main(int argc, char *argv[]) {
 
     /*********** the rest logic here... ************/
 
+    #if !USE_AESD_CHAR_DEVICE
     // Setup the timer
     setup_timer();
+    #endif
     
     // Loop until killed
     while (1) {
@@ -482,12 +497,14 @@ int main(int argc, char *argv[]) {
 
         // NOT A SIGNAL SAFE!!!
         if (close_syslog_flag) {
+            #if !USE_AESD_CHAR_DEVICE
             pthread_mutex_destroy(&dataMutex);
             if (timer_delete(timer_id) == -1) {
                 syslog(LOG_ERR,"timer_delete failed");
             } else {
                 syslog(LOG_DEBUG,"timer_delete successfully");
             }
+            #endif
             closelog();
             close_syslog_flag = 0;  // Reset the flag
             break;                  // DAEMON IS DONE.
