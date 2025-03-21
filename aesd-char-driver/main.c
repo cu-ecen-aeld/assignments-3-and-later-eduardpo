@@ -63,6 +63,11 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
      * TODO: handle read
      */
 
+    // Acquire mutex for thread safety
+    if (mutex_lock_interruptible(&dev->lock)) {
+        return -ERESTARTSYS;
+    }
+
     // Find the entry and offset corresponding to f_pos
     entry = aesd_circular_buffer_find_entry_offset_for_fpos(&dev->buffer, *f_pos, &entry_offset);
 
@@ -81,6 +86,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         }
     }
     
+    mutex_unlock(&dev->lock);
     return retval;
 }
 
@@ -110,6 +116,12 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     // Find new line
     new_line_pos = memchr(k_buf, '\n', count) != NULL;
 
+    // Acquire mutex
+    if (mutex_lock_interruptible(&dev->lock)) {
+        kfree(k_buf);
+        return -ERESTARTSYS;
+    }
+
     // Check if we need to append to existing entry or create new one
     if (dev->incomplete_entry.buffptr) {
         // Reallocate to accommodate new data
@@ -118,6 +130,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
                                GFP_KERNEL);
         if (!new_buf) {
             kfree(k_buf);
+            mutex_unlock(&dev->lock);
             return -ENOMEM;
         }
         dev->incomplete_entry.buffptr = new_buf;
@@ -148,7 +161,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     }
 
     retval = count;
-
+    mutex_unlock(&dev->lock);
     return retval;
 }
 struct file_operations aesd_fops = {
@@ -192,6 +205,9 @@ int aesd_init_module(void)
      * TODO: initialize the AESD specific portion of the device
      */
 
+    // Initialize the mutex for thread safety
+    mutex_init(&aesd_device.lock);
+
     // Circular buffer init (TODO: initialise mutex before)
     aesd_circular_buffer_init(&aesd_device.buffer);
 
@@ -222,6 +238,9 @@ void aesd_cleanup_module(void)
             kfree(entry->buffptr);
         }
     }
+
+     // Destroy the mutex
+     mutex_destroy(&aesd_device.lock);
 
     unregister_chrdev_region(devno, 1);
 }
