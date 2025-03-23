@@ -4,16 +4,16 @@
 case "$1" in
     start)
         echo "Loading aesdchar kernel module"
-        aesdchar_load
+        /etc/init.d/aesdchar_load
         ;;
     stop)
         echo "Unloading aesdchar kernel module"
-        aesdchar_unload
+        /etc/init.d/aesdchar_unload
         ;;
     restart)
         echo "Reloading aesdchar kernel module"
-        aesdchar_unload
-        aesdchar_load
+        /etc/init.d/aesdchar_unload
+        /etc/init.d/aesdchar_load
         ;;
     *)
         echo "Usage $0 {start | stop | restart}"
