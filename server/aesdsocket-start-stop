@@ -6,7 +6,7 @@ DAEMON_NAME=aesdsocket
 case "$1" in
     start)
         echo "Starting $DAEMON_NAME..."
-        start-stop-daemon -S -n $DAEMON_NAME -a $DAEMON
+        start-stop-daemon -S -b -x $DAEMON
         ;;
     stop)
         echo "Stopping $DAEMON_NAME..."
