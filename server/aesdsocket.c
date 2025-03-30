@@ -16,7 +16,7 @@
 #include <sys/stat.h> // umask
 #include "queue.h"
 #include <pthread.h>
-
+#include "../aesd-char-driver/aesd_ioctl.h"
 
 const char* PORT = "9000";
 
@@ -30,8 +30,8 @@ const char* PORT = "9000";
     #define AESDSOCKETDATA "/var/tmp/aesdsocketdata"
 #endif
 
-int sfd, cfd;
-FILE *dataFile;
+//int sfd, cfd;   // server, client file descriptors
+FILE *dataFile; // read, write file (device), TODO: convert to thread param...
 pthread_mutex_t dataMutex;
 
 // SLIST.
@@ -152,8 +152,8 @@ void signal_handler(int signum) {
     }
 
     // cleaning
-    syslog(LOG_DEBUG, "Closing server socket fd: %d", sfd);
-    close(sfd);
+    // syslog(LOG_DEBUG, "Closing server socket fd: %d", sfd);
+    // close(sfd);
     // syslog(LOG_DEBUG, "Closing dataFile");
     // if (fclose(dataFile) != 0) {
     //     syslog(LOG_ERR, "failed to close file");
@@ -174,6 +174,28 @@ void signal_handler(int signum) {
     errno = errno_saved;
 
     exit(EXIT_SUCCESS);
+}
+
+void handle_seek_ioctl(const char *rcvmsg, FILE *dataFile) {
+    
+    unsigned int write_cmd_scanned, write_cmd_offset_scanned;
+
+    if (sscanf(rcvmsg, "AESDCHAR_IOCSEEKTO:%u,%u", &write_cmd_scanned, &write_cmd_offset_scanned) == 2) {
+        
+        struct aesd_seekto seek_data;
+        seek_data.write_cmd = write_cmd_scanned;
+        seek_data.write_cmd_offset = write_cmd_offset_scanned;
+
+        int fd = fileno(dataFile); // get regular fd from buffered FILE*
+        syslog(LOG_DEBUG, "Calling ioctl with: %s, for FD: %d, with AESDCHAR_IOCSEEKTO:%u,%u", 
+            rcvmsg, fd, seek_data.write_cmd, seek_data.write_cmd_offset);
+
+        if (ioctl(fd, AESDCHAR_IOCSEEKTO, &seek_data) == -1) {
+            syslog(LOG_ERR, "Error: ioctl AESDCHAR_IOCSEEKTO: %s (%d)", strerror(errno), errno);
+            fclose(dataFile);
+            exit(-1);
+        }
+    }
 }
 
 void *processConnectionThread(void *arg) {
@@ -201,13 +223,7 @@ void *processConnectionThread(void *arg) {
     } else if (len == 0) {
         syslog(LOG_DEBUG, "Client on socket %d disconnected", t_data->cfd);
     } else {
-
-        for (int i=0; i<len; i++) {
-            if (rcvmsg[i] == '\n') {
-                rcvmsg[++i] = '\0';
-                break;
-            }
-        }
+    
         syslog(LOG_DEBUG, "Data received from client on socket %d: %s", t_data->cfd, rcvmsg);
 
         // critical section start
@@ -228,19 +244,52 @@ void *processConnectionThread(void *arg) {
             closelog();
             fclose(dataFile);
             exit(-1);
-        }
-        fprintf(dataFile, "%s", rcvmsg);
+        }        
 
-        // send the whole contant back
-        rewind(dataFile);
-        while (fgets(rcvmsg, sizeof(rcvmsg), dataFile) != NULL) {
-            size_t len = strlen(rcvmsg);
-            send(t_data->cfd, rcvmsg, len, 0); // Send the received data
+        // insure that string is terminated and has a new line
+        for (int i=0; i<len; i++) {
+            if (rcvmsg[i] == '\n') {
+                rcvmsg[++i] = '\0';
+                break;
+            }
         }
-        fclose(dataFile);
+        // char *newline = strchr(buffer, '\n');
+        // *(++newline) = '\0';
+
+        if (strncmp(rcvmsg, "AESDCHAR_IOCSEEKTO:", strlen("AESDCHAR_IOCSEEKTO:")) == 0) {
+            handle_seek_ioctl(rcvmsg, dataFile);
+        } else {
+            // write the command
+            fprintf(dataFile, "%s", rcvmsg);
+            fflush(dataFile);
+            // set f_pos=0 and send the whole contant back
+            rewind(dataFile);
+            syslog(LOG_DEBUG, "Received data was written to file");
+        }
+        
+        // read commands commands and send it one by one
+        syslog(LOG_DEBUG, "Sending dataFile content back to client...");
+        while (fgets(rcvmsg, sizeof(rcvmsg), dataFile) != NULL) {
+            syslog(LOG_DEBUG, "Sending current rcvmsg: %s", rcvmsg);
+            size_t len = strlen(rcvmsg);
+            rc = send(t_data->cfd, rcvmsg, len, 0); // Send the received command
+            if (rc < 0) {
+                syslog(LOG_ERR,"Failed to send rcvmsg: %s, of length: %lu, error: %s (%d)", rcvmsg, len, strerror(errno), errno);
+            }
+        }
+        syslog(LOG_DEBUG, "Reached to EOF dataFile handler for: %s file, closing...", AESDSOCKETDATA);
+        rc = fclose(dataFile);
+        if (rc != 0) {
+            syslog(LOG_ERR, "fclose failed with %d", rc);
+            syslog(LOG_ERR,"fclose failed with error: %s (%d), for the file: %s", strerror(errno), errno, AESDSOCKETDATA);
+            close(t_data->cfd);
+            close(t_data->sfd);
+            closelog();
+            exit(-1);
+        }
 
         rc = pthread_mutex_unlock(&dataMutex);
-        if (rc != 0 ) {
+        if (rc != 0) {
             syslog(LOG_ERR, "pthread_mutex_unlock failed with %d", rc);
             close(t_data->cfd);
             close(t_data->sfd);
@@ -286,6 +335,8 @@ int main(int argc, char *argv[]) {
         closelog();
         exit(-1);
     }
+
+    int sfd, cfd;   // server, client file descriptors
 
     int status;
     struct addrinfo hints;
